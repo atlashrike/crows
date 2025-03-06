@@ -1,0 +1,243 @@
+
+# Adapted from https://github.com/genomicrocosm/crowSat1_RAM/tree/master/LDhelmet
+
+import glob
+from os.path import join
+import re
+
+from sweden import sweden
+SWED = list(sweden.keys())  
+from intervallist3 import interval_list3
+CHROMOSOMES3 = [chrm for chrm in interval_list3.values()] 
+from sra_data import sra_data
+INDIVIDUALS = list(sra_data.keys())  
+CHROMS, STARTS, ENDS = glob_wildcards("data/vcfs/swed/swed_chr_{chrom}:{start}-{end}_phased_vcf.vcf.gz")
+N_HAPLOTYPES = 60
+MAX_SITES    = 1157291
+MAX_4NR      = 100
+
+rule all:
+    input:
+        "data/ldhelmet/testt/big.lk",
+        "data/ldhelmet/testt/big.pade"
+
+rule select_variants:
+    input:
+        vcf = "data/vcfs/chr_{chrom}_phased_vcf.vcf.gz",
+        ref = "reference/ref_genome.fasta"
+    output:
+        vcf = "data/vcfs/swed/swed_chr_{chrom}_phased_vcf.vcf.gz"
+    params:
+        sample_flags = lambda wildcards: " ".join(f"--sample-name {sample}" for sample in SWED)
+    shell:
+        """
+        gatk SelectVariants \
+            -R {input.ref} \
+            -V {input.vcf} \
+            {params.sample_flags} \
+            -O {output.vcf}
+        """
+######## not used        
+#rule vcf_to_ldhelmet_input:
+#    input:
+#        vcf="data/vcfs/swed/swed_chr_{chrom}_phased_vcf.vcf.gz",
+#        script="LDhelmetINfromVCF.py"
+#    output:
+#        fasta="data/ldhelmet/input/chr_{chrom}_1.fasta",
+#        pos="data/ldhelmet/input/chr_{chrom}_1.pos"
+#    shell:
+#        """
+#        python3.11 LDhelmetINfromVCF.py \
+#            --vcf {input.vcf} \
+#            --out_fasta {output.fasta} \
+#            --out_pos {output.pos}
+#        """
+########
+
+rule vcf2ldhelmetfasta:
+    input:
+        vcf = "data/vcfs/swed/swed_chr_{chrom}_phased_vcf.vcf.gz"
+    output:
+        "data/ldhelmet/input2/chr_{chrom}.FINAL_INPUT.fasta",
+        "data/ldhelmet/input2/chr_{chrom}.snp.pos.file"
+    resources:
+        runtime = 30
+    shell:
+        r"""
+        cd ~/scratch/crows
+        
+        vcftools \
+          --gzvcf {input.vcf} \
+          --plink \
+          --out data/ldhelmet/input2/chr{wildcards.chrom}
+
+        plink \
+          --ped data/ldhelmet/input2/chr{wildcards.chrom}.ped \
+          --map data/ldhelmet/input2/chr{wildcards.chrom}.map \
+          --recode fastphase \
+          --out data/ldhelmet/input2/chr{wildcards.chrom}
+
+        cd data/ldhelmet/input2/
+
+        phasefile="chr{wildcards.chrom}.chr-0.recode.phase.inp"
+
+        grep '^P' "$phasefile" \
+          | sed 's/ /\n/g' \
+          | tail -n +2 > chr_{wildcards.chrom}.snp.pos.file
+
+        tail -n +4 "$phasefile" \
+          | sed 's/#/>/g' \
+          | sed 's/ /_/g' > chr{wildcards.chrom}.temp
+
+        grep '>' chr{wildcards.chrom}.temp > chr{wildcards.chrom}.ID_1
+        awk '{{print $1 "_2"}}' chr{wildcards.chrom}.ID_1 > chr{wildcards.chrom}.ID_2
+
+        sed -n '2~3p' chr{wildcards.chrom}.temp > chr{wildcards.chrom}.H1
+        sed -n '3~3p' chr{wildcards.chrom}.temp > chr{wildcards.chrom}.H2
+
+        paste chr{wildcards.chrom}.ID_1 chr{wildcards.chrom}.H1 \
+          | tr "\t" "\n" > chr{wildcards.chrom}.ID_1_H1
+        paste chr{wildcards.chrom}.ID_2 chr{wildcards.chrom}.H2 \
+          | tr "\t" "\n" > chr{wildcards.chrom}.ID_2_H2
+
+        cat chr{wildcards.chrom}.ID_1_H1 chr{wildcards.chrom}.ID_2_H2 \
+          > chr_{wildcards.chrom}.FINAL_INPUT.fasta
+
+        rm -f chr{wildcards.chrom}.ID_1 \
+              chr{wildcards.chrom}.ID_2 \
+              chr{wildcards.chrom}.H1 \
+              chr{wildcards.chrom}.H2 \
+              chr{wildcards.chrom}.ID_1_H1 \
+              chr{wildcards.chrom}.ID_2_H2 \
+              chr{wildcards.chrom}.temp
+
+        """
+
+rule find_confs:
+    input:
+        "data/ldhelmet/input2/chr_{chrom}.FINAL_INPUT.fasta"
+    output:
+        "data/ldhelmet/conf/chr_{chrom}.conf"
+    resources:
+        runtime = 120
+    params:
+        window=50,
+        threads=10
+    shell:
+        """
+        LDhelmet/./ldhelmet find_confs \
+           --num_threads {params.threads} \
+           -w {params.window} \
+           -o {output} \
+           {input}
+        """
+
+rule table_gen:
+    input:
+        conf="data/ldhelmet/conf/chr_{chrom}.conf"
+    output:
+        lk="data/ldhelmet/lk/chr_{chrom}.lk"
+    resources:
+        runtime = 240
+    params:
+        theta=0.0019,
+        rgrid="0.0 0.1 10.0 1.0 100.0",
+        threads=40
+    shell:
+        """
+        LDhelmet/./ldhelmet table_gen \
+           --num_threads {params.threads} \
+           -c {input.conf} \
+           -t {params.theta} \
+           -r {params.rgrid} \
+           -o {output.lk}
+        """
+        
+rule pade:
+    input:
+        conf="data/ldhelmet/conf/chr_{chrom}.conf"
+    output:
+        pade="data/ldhelmet/pade/chr_{chrom}.pade"
+    resources:
+        runtime = 360
+    params:
+        theta=0.0019,
+        x=12,
+        threads=40
+    shell:
+        """
+        LDhelmet/./ldhelmet pade \
+           --num_threads {params.threads} \
+           -c {input.conf} \
+           -t {params.theta} \
+           -x {params.x} \
+           -o {output.pade}
+        """
+
+rule rjmcmc:
+    input:
+        fasta="data/ldhelmet/input2/chr_{chrom}.FINAL_INPUT.fasta",
+        pos="data/ldhelmet/input2/chr_{chrom}.snp.pos.file",
+        lk="data/ldhelmet/lk/chr_{chrom}.lk",
+        pade="data/ldhelmet/pade/chr_{chrom}.pade"
+    output:
+        post="data/ldhelmet/post/chr_{chrom}.post"
+    resources:
+        runtime = 480
+    params:
+        window=50,
+        block_penalty=50.0,
+        burn_in=100000,
+        n_iter=1000000,
+        threads=40,
+        mut_mat=""  
+    shell:
+        """
+        LDhelmet/./ldhelmet rjmcmc \
+          --num_threads {params.threads} \
+          -w {params.window} \
+          -l {input.lk} \
+          -p {input.pade} \
+          --snps_file {input.fasta} \
+          -b {params.block_penalty} \
+          --pos_file {input.pos} \
+          --burn_in {params.burn_in} \
+          -n {params.n_iter} \
+          -o {output.post} \
+          {params.mut_mat}
+        """
+
+rule post_to_text:
+    input:
+        "data/ldhelmet/post/chr_{chrom}.post"
+    output:
+        "data/ldhelmet/final/chr_{chrom}.final.txt"
+    resources:
+        runtime = 30
+    params:
+        perc_string=lambda wildcards: ' '.join(f'-p {x}' for x in [0.025, 0.5, 0.975])
+    shell:
+        """
+        LDhelmet/ldhelmet post_to_text \
+            -m {params.perc_string} \
+            -o {output} \
+            {input}
+        """
+
+rule convert_to_map:
+    input:
+        txt="data/ldhelmet/final/chr_{chrom}.final.txt",
+        script="relatemap.py"
+    output:
+        "data/ldhelmet/map/chr__{chrom}.map"
+    resources:
+        runtime = 30
+    params:
+        ne=200000
+    shell:
+        """
+        python3.11 relatemap.py \
+            --input {input.txt} \
+            --output {output} \
+            --ne {params.ne}
+        """

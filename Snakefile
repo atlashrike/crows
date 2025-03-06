@@ -3,24 +3,36 @@ from sra_data import sra_data
 from outgroup_data import outgroup_data
 from intervals import interval_list
 from intervals2 import interval_list2
+from intervallist3 import interval_list3
 from species_samples import species_samples
 
+INDIVIDUALS = list(sra_data.keys())  
 SRA_IDS = [sra_id for individual in sra_data.values() for sra_id in individual]
 OUTGROUP_IDS = [outgroup_id for individual in outgroup_data.values() for outgroup_id in individual]
 individual_sra_pairs = [(individual, sra_id) for individual, sra_ids in sra_data.items() for sra_id in sra_ids]
 individual_outgroup_pairs = [(individual, outgroup_id) for individual, outgroup_ids in outgroup_data.items() for outgroup_id in outgroup_ids]
+
 CHROMOSOMES = [chrm for chrm in interval_list.values()]
 CHROMOSOMES2 = [chrm for chrm in interval_list2.values()] 
 # I had two scaffolds that had no data after filtering, so this is the chromosomes + scaffolds list without that 
+CHROMOSOMES3 = [chrm for chrm in interval_list3.values()] 
+# Same as above, but minus lacking some scaffolds which had too little (?) data to be put through LDhelmet 
+
 SPECIES_IDS = [species_id for species in species_samples.values() for species_id in species]
 species_pairs = [(species, species_id) for species, species_ids in species_samples.items() for species_id in species_ids]
+
 PARTS = ["1","2","3","4","5","6","7","8"]
+Nes = ["200000"]       
+m = ["3.18e-9"] 
+GEN = 5.79 
+Ts = [None]
+
+# rule all was used to run various rules, i.e. was changed based on what file i was trying to make
 
 rule all:
     input:
-        expand("data/haps/chr_{chrm}_haps_orig.haps",
-               chrm=interval_list2.values()),
-        expand("data/estsfs/output/chr_{chrm}_output-file-sfs_part{part}.txt", chrm=interval_list2.values(), part=PARTS)
+        expand("data/relate/estimpopsize/chr_{chrm}.pdf", chrm=CHROMOSOMES3)
+       
 
 rule downloads:
     input:
@@ -59,7 +71,10 @@ rule convert_to_fastq:
         "sra/{sra_id}.sra"
     output:
         "fastq/{individual}/{sra_id}_1.fastq",  
-        "fastq/{individual}/{sra_id}_2.fastq"   
+        "fastq/{individual}/{sra_id}_2.fastq"  
+    resources:
+        runtime = 15
+    threads: 5
     shell:
         """
         mkdir -p fastq/{wildcards.individual}
@@ -196,6 +211,9 @@ rule extract_rg_info_in:
         library_names="library_names.json"
     output:
         "data/{individual}/{sra_id}_rg_info.json"
+    resources:
+        runtime = 15
+    threads: 1
     run:
         import json
 
@@ -311,8 +329,8 @@ rule convert_to_ubam_in:
     output:
         "data/{individual}/{sra_id}_output.bam"
     resources:
-        runtime = 120,
-        nodes = 20
+        runtime = 120
+    threads: 800
     run:
         import json
 
@@ -380,7 +398,7 @@ rule mark_illumina_adapters_in:
         metrics = "data/{individual}/{sra_id}_markilluminaadapters_metrics.txt"
     resources:
         runtime = 120,
-        nodes = 5
+    threads: 10
     params:
         tmp_dir="temp/sra_processing" 
     shell:
@@ -425,7 +443,7 @@ rule sam_to_fastq_in:
         "data/{individual}/{sra_id}_fastq.fq"
     resources:
         runtime = 60,
-        nodes = 5
+    threads: 10
     params:
         tmp_dir="temp/sra_processing"   
     shell:
@@ -476,8 +494,7 @@ rule bwa_mem_in:
         "data/{individual}/{sra_id}_bwa_mem.sam"
     resources:
         runtime = 120,
-        tasks = 4
-    threads: 20
+    threads: 10
     shell:
          """
         bwa/bwa mem -M -t {threads} -p {input.reference} {input.fastq} > {output}
@@ -514,8 +531,8 @@ rule merge_bam_alignment_in:
         "data/{individual}/{sra_id}_mergebamalignment.bam"
         # "data/{individual}/{sra_id}_mergebamalignment.bai"
     resources:
-        runtime = 270
-    threads: 20
+        runtime = 180
+    threads: 10
     params:
         tmp_dir="temp/sra_processing"  
     shell:
@@ -525,7 +542,7 @@ rule merge_bam_alignment_in:
             UNMAPPED_BAM={input.unmapped_bam} \
             ALIGNED_BAM={input.aligned_bam} \
             O={output[0]} \
-            CREATE_INDEX=true \
+            # CREATE_INDEX=true \
             ADD_MATE_CIGAR=true \
             CLIP_ADAPTERS=false \
             CLIP_OVERLAPPING_READS=true \
@@ -533,6 +550,7 @@ rule merge_bam_alignment_in:
             MAX_INSERTIONS_OR_DELETIONS=-1 \
             PRIMARY_ALIGNMENT_STRATEGY=MostDistant \
             ATTRIBUTES_TO_RETAIN=XS \
+            SORT_ORDER=queryname \
             TMP_DIR={params.tmp_dir}
         """
         
@@ -571,11 +589,11 @@ rule merge_bam_alignment_out:
 # not used if queryname sorted during merge bam alignment; only used if the .bai files is needed and therefore merge bam alignment will need to be coordinate-sorted.
 rule sortbam:
     input:
-        bam="outgroup/data/{individual}/{outgroup_id}_mergebamalignment.bam"
-        # bam="data/{individual}/{sra_id}_mergebamalignment.bam"
+        # bam="outgroup/data/{individual}/{outgroup_id}_mergebamalignment.bam"
+        bam="data/{individual}/{sra_id}_mergebamalignment.bam"
     output: 
-        bam="outgroup/data/{individual}/{outgroup_id}_sortedbam.bam"
-        # bam="data/{individual}/{sra_id}_sortedbam.bam"
+        # bam="outgroup/data/{individual}/{outgroup_id}_sortedbam.bam"
+        bam="data/{individual}/{sra_id}_sortedbam.bam"
     params:
         tmp_dir=lambda wildcards: f"temp/sortbam/{wildcards.individual}" 
     resources:
@@ -598,13 +616,14 @@ rule markdup:
 
 rule mark_duplicates_spark_in:
     input:
-        lambda wildcards: expand("data/{individual}/{sra_id}_mergebamalignment.bam", individual=wildcards.individual, sra_id=sra_data[wildcards.individual])
+        lambda wildcards: expand("data/{individual}/{sra_id}_sortedbam.bam", individual=wildcards.individual, sra_id=sra_data[wildcards.individual])
     output:
         bam="data/{individual}/{individual}_merged_dedup.bam",
         metrics="data/{individual}/{individual}_merged_dedup_metrics.txt"
     resources:
         runtime = 200,
-        nodes = 20
+        tasks = 4
+    threads: 20
     params:
         tmp_dir=lambda wildcards: f"temp/spark_processing/{wildcards.individual}"  
     run:
@@ -735,10 +754,10 @@ rule split_intervals:
             --scatter-count {params.scatter_count} 
         """
 
-rule genomicsdb:
-    input:
-        directory(expand("data/genomicsdb/chr_{chrm}", chrm=CHROMOSOMES)),
-        directory(expand("outgroup/genomicsdb/{species}/chr_{chrm}",  chrm=CHROMOSOMES, species=species_samples.keys()))
+# rule genomicsdb:
+   #  input:
+     #   directory(expand("data/genomicsdb/chr_{chrm}", chrm=CHROMOSOMES)),
+     #   directory(expand("outgroup/genomicsdb/{species}/chr_{chrm}",  chrm=CHROMOSOMES, species=species_samples.keys()))
 
 rule genomics_db_in:
     input:
@@ -957,7 +976,21 @@ rule phase_vcfs:
         """
         java -Xmx150g -jar {input.path} gt={input.vcf} out=data/vcfs/chr_{wildcards.chrm}_phased_vcf impute=false
         """
-        
+ 
+rule i_am_once_again_indexing_the_vcf:
+    input:
+        vcf="data/vcfs/chr_{chrm}_phased_vcf.vcf.gz"
+    output:
+        index="data/vcfs/chr_{chrm}_phased_vcf.vcf.gz.tbi"
+    resources:
+        runtime=10
+    threads: 80
+    shell:
+        """
+        gatk --java-options "-Xmx16G" IndexFeatureFile \
+            -I {input.vcf} 
+        """      
+
 rule filter_out:
     input:
         expand("outgroup/vcfs/{species}/chr_{chrm}_filtered_filtered.vcf.gz", chrm=CHROMOSOMES2, species=species_samples.keys())
@@ -1065,14 +1098,18 @@ rule est_sfs:
         file = "data/estsfs/output/chr_{chrm}_output-file-sfs_part{part}.txt",
         pvalues = "data/estsfs/output/chr_{chrm}_output-file-pvalues_part{part}.txt"
     resources:
-        runtime = 150,
-        tasks = 80
+        runtime = 150
     threads: 1
     shell:
         """
         est-sfs-release-2.04/est-sfs {input.config} {input.data} \
             data/estsfs/seed-file.txt {output.file} {output.pvalues}
         """
+
+rule haps:
+    input:
+        expand("data/haps/chr_{chrm}_haps_polarized.haps", chrm=CHROMOSOMES2),
+        expand("data/haps/chr_{chrm}_haps_orig.haps", chrm=CHROMOSOMES2)
 
 rule make_haps:
     input:
@@ -1086,11 +1123,492 @@ rule make_haps:
 
 rule polarize_haps:
     input:
-        est_sfs = "data/estsfs/output/chr_{{chrm}}_output-file-sfs_part{part}.txt",
-        est_pvals = "data/estsfs/output/chr_{{chrm}}_output-file-pvalues_part{part}.txt",
+        est_sfs=[
+            f"data/estsfs/chr_{{chrm}}_estsfs_input_part{i}.txt"  
+            for i in PARTS
+        ],
+        est_pvals=[
+            f"data/estsfs/output/chr_{{chrm}}_output-file-pvalues_part{i}.txt" 
+            for i in PARTS
+        ],
         hap = "data/haps/chr_{chrm}_haps_orig.haps",
     output:
         polar = "data/haps/chr_{chrm}_haps_polarized.haps"
     threads: 1
     script:
         "polar.py"
+
+rule mask: 
+    input:
+        "ref_genome_NP.fa",
+        expand("data/haps/chr_{chrm}_haps_polarized_masked.haps", chrm=CHROMOSOMES2)
+        
+rule make_mask:
+    input:
+        "reference/ref_genome.fasta"
+    output:
+        "reference/ref_genome_NP.fa"
+    shell:
+        """
+        (head -n 1 {input} && tail -n +2 {input} | sed 's/[ACGT]/P/g') > {output}
+        """
+
+rule relate_input:
+    input:
+        relate = "relate/bin/Relate"
+    output:
+        polarized_hap = "data/haps/chr_{chrm}_haps.haps",
+        haploid_sample = "data/haps/chr_{chrm}_haps.sample",
+    params:
+        out_prefix = "data/haps/chr_{chrm}_haps",
+        vcf = "data/vcfs/chr_{chrm}_phased_vcf" 
+    shell:
+        """
+        {input.relate}FileFormats \
+                 --mode ConvertFromVcf \
+                 --haps {params.out_prefix}.haps \
+                 --sample {params.out_prefix}.sample \
+                 -i {params.vcf} 
+        """
+
+rule hapmask:
+    input:
+        polarized_hap = "data/haps/chr_{chrm}_haps.haps",
+        haploid_sample = "data/haps/chr_{chrm}_haps.sample",
+        mask = "reference/ref_genome_NP.fa",
+        relate = "relate/bin/Relate"  
+    output:
+        haps = "data/haps/chr_{chrm}_haps_polarized_masked.haps",
+        dist = "data/haps/chr_{chrm}_haps_polarized_masked.dist"
+    params:
+        out_prefix = "data/haps/chr_{chrm}_haps_polarized_masked"
+    shell:
+        """
+        {input.relate}FileFormats \
+            --mode FilterHapsUsingMask \
+            --haps {input.polarized_hap} \
+            --sample {input.haploid_sample} \
+            --mask {input.mask} \
+            -o {params.out_prefix}
+        """
+
+rule relates: 
+    input:
+        expand("data/haps/chr_{chrm}.anc", chrm=CHROMOSOMES2)
+
+rule relate:
+    input:
+        haps = "data/haps/chr_{chrm}_haps_polarized_masked.haps",
+        dist = "data/haps/chr_{chrm}_haps_polarized_masked.dist",
+        sample = "data/haps/chr_{chrm}_haps.sample",
+        map = "data/ldhelmet/map/chr__{chrm}.map"
+    output:
+        anc = "data/relate/chr_{chrm}/chr_{chrm}.anc",
+        mut = "data/relate/chr_{chrm}/chr_{chrm}.mut"
+    params:
+        prefix = lambda wildcards: f"chr_{wildcards.chrm}"
+    resources:
+        time = 60
+    threads: 1
+    shell:
+        """
+        TMPDIR="temp/relate_chr_{wildcards.chrm}"
+        mkdir -p $TMPDIR
+        cd $TMPDIR
+
+        ~/scratch/crows/relate/bin/Relate --mode All \
+            --haps ~/scratch/crows/{input.haps} \
+            --dist ~/scratch/crows/{input.dist} \
+            --map ~/scratch/crows/{input.map}\
+            --sample ~/scratch/crows/{input.sample} \
+            -N 200000 \
+            -m 3.18e-9 \
+            -o {params.prefix} \
+            --seed 1 \
+            --memory 5
+            
+        mv {params.prefix}.mut {params.prefix}.anc ~/scratch/crows/data/relate/chr_{wildcards.chrm}/ 
+        cd ~/scratch/crows
+        rm -rf $TMPDIR
+        """
+
+rule poplabels:
+    input:
+        haps="data/haps/chr_{chrm}_haps.sample",              
+        library_names="library_names.json",  
+        sra_data="sra_data.py"           
+    output:
+        poplabels="data/relate/poplabels/chr_{chrm}_poplabels.txt"
+    run:
+        import json
+        with open(input.library_names, 'r') as f:
+            lib_names = json.load(f)
+        
+        sras = {}
+        with open(input.sra_data, 'r') as f:
+            exec(f.read(), sras)
+        if "sra_data" in sras:
+            sra_data = sras["sra_data"]
+        else:
+            raise ValueError("sra_data.py does not define 'sra_data'")
+
+        samples = []
+        with open(input.haps, 'r') as f:
+            header = next(f)  # header line
+            dummy = next(f)   # dummy row ("0 0 0")
+            for line in f:
+                line = line.strip()
+                if line:
+                    parts = line.split()
+                    samples.append(parts[0])
+        
+        with open(output.poplabels, 'w') as out:
+            out.write("sample population group sex\n")
+            for srx in samples:
+                if srx not in sra_data:
+                    raise ValueError(f"Sample {srx} not found in sra_data")
+                srr_list = sra_data[srx]
+                srr = srr_list[0]
+                if srr not in lib_names:
+                    raise ValueError(f"SRR {srr} not found in library_names")
+                lib = lib_names[srr]
+                parts = lib.split("_")
+                if len(parts) < 2:
+                    raise ValueError(f"Library name {lib} is not in the expected format")
+                pop1 = parts[0]
+                pop2 = parts[1]
+                if parts[0] in ("D", "E"):
+                    grp = "corone"
+                if parts[0] in ("S", "PL"):
+                    grp = "cornix"
+                out.write(f"{srx}_1 {pop1}_{pop2} {grp} 1\n")
+                out.write(f"{srx}_2 {pop1}_{pop2} {grp} 1\n")
+
+rule estimate_popsize:
+    input:
+        anc = "data/relate/chr_{chrm}/chr_{chrm}.anc",
+        mut = "data/relate/chr_{chrm}/chr_{chrm}.mut",
+        poplabels = "data/relate/poplabels/chr_{chrm}_poplabels.txt"
+    output:
+        "data/relate/estimpopsize/chr_{chrm}.pdf"
+    params:
+        prefix = lambda wildcards: f"data/relate/chr_{wildcards.chrm}/chr_{wildcards.chrm}",
+        prefix_out = lambda wildcards: f"data/relate/estimpopsize/chr_{wildcards.chrm}"
+    resources:
+        time = 60
+    threads: 10
+    shell:
+        """
+        module load gcc/8.3.0 
+        module load r/4.2.2-batteries-included 
+        ~/scratch/crows/relate/scripts/EstimatePopulationSize/EstimatePopulationSize.sh \
+            -i {params.prefix} \
+            --poplabels {input.poplabels} \
+            --years_per_gen 5.79 \
+            --seed 1 \
+            --num_iter 10 \
+            --threshold 0.5 \
+            --threads {threads} \
+            -m 3.18e-9 \
+            -o {params.prefix_out} \    
+        """
+
+rule treeseq:
+    input:
+        anc = "data/relate/estimpopsize/chr_{chrm}.anc.gz",
+        mut = "data/relate/estimpopsize/chr_{chrm}.mut.gz"
+    output:
+        "data/relate/trees/chr_{chrm}.trees"
+    params:
+        prefix = lambda wildcards: f"data/relate/estimpopsize/chr_{wildcards.chrm}",
+        prefix_out = lambda wildcards: f"data/relate/trees/chr_{wildcards.chrm}"
+    resources:
+        time = 60
+    threads: 10
+    shell:
+        """
+        ~/scratch/crows/relate/bin/RelateFileFormats \
+            --mode ConvertToTreeSequence \
+            -i {params.prefix} \
+            -o {params.prefix_out} \    
+        """
+
+checkpoint get_bps:
+  input:
+    anc = "data/relate/estimpopsize/chr_{chrm}.anc.gz",
+    mut = "data/relate/estimpopsize/chr_{chrm}.mut.gz"
+  output:
+    bps = "data/relate/bps/chr_{chrm}_bps.txt"
+  params:
+    TREESKIP = 100
+  run:
+    import gzip
+    print("Getting tree indices for chromosome {0}".format(wildcards.chrm))
+    ixs_start = []
+    ixs_end = []
+    trees = []
+    with gzip.open(input.anc, "rt") as f:
+      for i, line in enumerate(f):
+        if i == 1:
+          n = int(line.split()[1])
+          trees = [x for x in range(0, n+1, int(params.TREESKIP))]
+        if i > 1 and (i-2) in trees:
+          ixs_start.append(int(line.split(':')[0]))
+        if i > 2 and (i-3) in trees:
+          ixs_end.append(int(line.split(':')[0]) - 1)
+    print("Chose {0} trees".format(len(ixs_start)))
+    print("Getting start and stop basepairs from the mutation file")
+    bps_start = []
+    bps_end = []
+    with gzip.open(input.mut, "rt") as f:
+      for i, line in enumerate(f):
+        if i > 0 and int(line.split(';')[0]) in ixs_start:
+          bps_start.append(int(line.split(';')[1]))
+        if i > 1 and int(line.split(';')[0]) in ixs_end:
+          bps_end.append(int(line.split(';')[1]))
+    print("Writing basepair intervals to file")
+    with open(output.bps, "w") as out:
+      for start, end in zip(bps_start, bps_end):
+        out.write(f"{start} {end}\n")
+
+### rules after here were not used, and spacetreesfile continues from here ###
+
+checkpoint gather_bps:
+    input:
+        "data/relate/bps/chr_{chrm}_bps.txt"
+    output:
+        touch("checkpoint.touch")  
+    run:
+        pass
+
+def input_func(wildcards):
+    chrm = wildcards["chrm"] 
+    bps_file = checkpoints.get_bps.get(chrm=chrm).output.bps
+    intervals = []
+    with open(bps_file) as f:
+        for line in f:
+            start, stop = line.strip().split()
+            intervals.append(f"data/relate/trees2/chr_{chrm}_{start}-{stop}.newick")
+    return intervals
+
+rule sample_tree:
+    input:
+        anc  = "data/relate/estimpopsize/chr_{chrm}.anc.gz",
+        mut  = "data/relate/estimpopsize/chr_{chrm}.mut.gz",
+        dist = "data/relate/estimpopsize/chr_{chrm}.dist",
+        coal = "data/relate/estimpopsize/chr_{chrm}.coal"
+    output:
+        "data/relate/trees2/chr_{chrm}_{start}-{stop}.newick"
+    resources:
+        runtime=15
+    params:
+        prefix_in  = lambda w: f"data/relate/estimpopsize/chr_{w.chrm}",
+        prefix_out = lambda w: f"data/relate/trees2/chr_{w.chrm}_{w.start}-{w.stop}"
+    threads: 1
+    shell:
+        """
+        module load gcc/9.2.0
+        ~/scratch/crows/relate/scripts/SampleBranchLengths/SampleBranchLengths.sh \
+            -i {params.prefix_in} \
+            --dist {input.dist} \
+            --coal {input.coal} \
+            -o {params.prefix_out} \
+            -m 3.18e-9 \
+            --format n \
+            --num_samples 100 \
+            --first_bp {wildcards.start} \
+            --last_bp {wildcards.stop} \
+            --seed 1
+        """
+
+rule sample_trees:
+    input:
+        lambda wildcards: [
+            fn
+            for c in CHROMOSOMES3
+            for fn in input_func({'chrm': c})
+        ]
+
+def input_func2(wildcards):
+    chrm = wildcards["chrm"] 
+    bps_file = checkpoints.get_bps.get(chrm=chrm).output.bps
+    intervals = []
+    with open(bps_file) as f:
+        for line in f:
+            start, stop = line.strip().split()
+            intervals.append(f"data/relate/trees2/chr_{chrm}_{start}-{stop}._sts.npy")
+    return intervals
+    
+def input_func3(wildcards):
+    chrm = wildcards["chrm"] 
+    bps_file = checkpoints.get_bps.get(chrm=chrm).output.bps
+    intervals = []
+    with open(bps_file) as f:
+        for line in f:
+            start, stop = line.strip().split()
+            intervals.append(f"data/relate/trees2/chr_{chrm}_{start}-{stop}._cts.npy")
+    return intervals
+    
+rule times:
+  input:
+        lambda wildcards: [
+            fn
+            for c in CHROMOSOMES4
+            for fn in input_func2({'chrm': c})
+        ],
+        lambda wildcards: [
+            fn
+            for c in CHROMOSOMES4
+            for fn in input_func3({'chrm': c})
+        ]
+
+
+rule time:
+    # the tree files are really large, so use chunked reading, binary .npy reads
+    input:
+        newick = "data/relate/trees2/chr_{chrm}_{start}-{stop}.newick"
+    output:
+        stss = "data/relate/trees2/chr_{chrm}_{start}-{stop}._sts.npy",
+        ctss = "data/relate/trees2/chr_{chrm}_{start}-{stop}._cts.npy"
+    threads: 1
+    resources:
+        runtime = 150
+    run:
+        import os
+        
+        os.environ["OMP_NUM_THREADS"] = str(threads)
+        os.environ["MKL_NUM_THREADS"] = str(threads)
+        os.environ["NUMEXPR_NUM_THREADS"] = str(threads)
+        
+        import numpy as np
+        from pathlib import Path
+        from tqdm import tqdm
+        from tsconvert import from_newick
+        from utils import get_shared_times
+        
+        def process_in_chunks(input_newick, output_sts, output_cts, chunk_size=1000):
+            with open(input_newick, "r") as f_in: #read in tree line-by-line, in chunks 
+                next(f_in) # skip header line
+                
+                stss_chunk = [] 
+                ctss_chunk = []
+                count = 0
+               
+                for line in tqdm(f_in, desc="Reading and processing in chunks"):
+                    # parse tree, build sts and cts
+                    parts = line.strip().split()
+                    if len(parts) < 5:
+                        # skip invalid lines
+                        continue
+                    
+                    newick_str = parts[4]
+                    ts = from_newick(newick_str)
+                    tree = ts.first()  # assume there is one tree 
+                                        
+                    # get shared times
+                    sample_nodes = list(ts.samples())
+                    samples = [int(ts.node(node).metadata.get("name", 0)) for node in sample_nodes]
+                    sample_order = np.argsort(samples)
+                    ordered_samples = [sample_nodes[i] for i in sample_order]
+                    sts = get_shared_times(tree, ordered_samples)
+                    
+                    # get coalescence times
+                    cts = sorted([tree.time(n) for n in tree.nodes() if not tree.is_sample(n)])
+                    
+                    stss_chunk.append(sts)
+                    ctss_chunk.append(cts)
+                    
+                    count += 1
+                    
+                    # once the chunk_size is reached, flush to disk
+                    if count % chunk_size == 0:
+                        flush_chunk(stss_chunk, ctss_chunk, output_sts, output_cts)
+                        stss_chunk = []
+                        ctss_chunk = []
+                
+                # flush any remainder at the end
+                if stss_chunk:
+                    flush_chunk(stss_chunk, ctss_chunk, output_sts, output_cts)
+
+        def flush_chunk(stss_chunk, ctss_chunk, output_sts, output_cts):
+            import numpy as np
+            from pathlib import Path
+            
+            stss_array = np.array(stss_chunk, dtype=np.float64) #convert chunk list to numpy array 
+            ctss_array = np.array(ctss_chunk, dtype=np.float64)
+            
+            # first write, save; else, append
+            if not Path(output_sts).exists():
+                np.save(output_sts, stss_array)
+                np.save(output_cts, ctss_array)
+            else:
+                old_sts = np.load(output_sts, mmap_mode=None)  # can use 'mmap_mode="r"' ?
+                combined_sts = np.concatenate((old_sts, stss_array), axis=0)
+                np.save(output_sts, combined_sts)
+                
+                old_cts = np.load(output_cts, mmap_mode=None)
+                combined_cts = np.concatenate((old_cts, ctss_array), axis=0)
+                np.save(output_cts, combined_cts)
+        
+        # run the chunked processing
+        process_in_chunks(
+            input.newick,
+            output.stss,
+            output.ctss,
+            chunk_size=1000  
+        )
+
+rule locations:
+    input:
+        "data/haps/chr_{chrm}_haps.sample",     
+        "library_names.json", 
+        "sra_data.py"         
+    output:
+        sample = "data/relate/locs/chr_{chrm}_haps_locations.npy"
+    run:
+        import json, numpy as np
+
+        sra_namespace = {}
+        with open(input[2]) as f:
+            exec(f.read(), sra_namespace)
+        sra_data = sra_namespace["sra_data"]
+
+        # the library names which have the location info
+        with open(input[1]) as f:
+            lib_names = json.load(f)
+
+        sample_ids = []
+        with open(input[0]) as f:
+            next(f)  # skip header
+            next(f)  # skip dummy row
+            for line in f:
+                sample_ids.append(line.strip().split()[0])
+
+        site_coords = {
+            "Wa": [52.233333, 8.916667],    # Warsaw, Poland: 52°14'N, 8°55'E
+            "Vi": [42.583333, -5.483333],   # La Sorriba, Spain: 42°35'N, 5°29'W
+            "Ri": [59.80, 18.37],   # Uppsala, Sweden: 59°52'N, 17°38'E
+            "Up": [59.866667, 17.633333],   # Uppsala, Sweden: 59°52'N, 17°38'E
+            "Ra": [47.666667, 9],    # Radolfzell, Germany: 47°40'N, 9°0'E
+            "Ko": [47.75, 9.2]     # Konstanz, Germany: 47°45'N, 9°12'E
+        }
+
+        
+        coords = []
+        for srx in sample_ids:
+            srr_list = sra_data.get(srx, [])
+            if not srr_list:
+                raise ValueError(f"No SRR found for sample {srx}")
+            srr = srr_list[0]
+            if srr not in lib_names:
+                raise ValueError(f"SRR {srr} not found in library_names.json")
+            lib = lib_names[srr]
+            parts = lib.split('_')
+            if len(parts) < 2:
+                raise ValueError(f"Library name {lib} does not contain a site code")
+            site = parts[1]
+            if site not in site_coords:
+                raise ValueError(f"Site code {site} not defined in site_coords")
+            coords.append(site_coords[site])
+        coords = np.array(coords)
+        np.save(output[0], coords)

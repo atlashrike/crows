@@ -1,6 +1,6 @@
 
 # Adapted from https://github.com/genomicrocosm/crowSat1_RAM/tree/master/LDhelmet
-
+# snakemake pipeline for inferring recombination maps from phased VCFs using LDhelmet
 import glob
 from os.path import join
 import re

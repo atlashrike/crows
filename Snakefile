@@ -1,3 +1,5 @@
+# snakemake pipeline for processing of fasta files to VCF, phasing, polarizing, and running Relate
+
 import json
 from sra_data import sra_data
 from outgroup_data import outgroup_data
